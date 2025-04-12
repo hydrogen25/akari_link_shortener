@@ -110,4 +110,51 @@ impl Client<'_> {
             Err(val) => Err(val.to_string()),
         }
     }
+
+    pub async fn shorten_a_link_all(
+        &self,
+        url: &str,
+        custom_code: Option<&str>,
+        private: Option<bool>,
+    ) -> Result<ShortenLinkResponse, String> {
+        let client = reqwest::Client::new();
+        let mut request_body = ShortenLinkRequest {
+            url,
+            custom_code: None,
+            private: None,
+        };
+
+        if let Some(val) = custom_code {
+            request_body.custom_code = custom_code;
+        };
+
+        if let Some(val) = private {
+            request_body.private = private;
+        };
+
+        let mut headers = HeaderMap::new();
+
+        let api_key = format!("API-key {}", self.api_key);
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&api_key).unwrap());
+
+        let r = client
+            .post("https://api.waa.ai/v2/links")
+            .headers(headers)
+            .json(&request_body)
+            .send()
+            .await;
+
+        match r {
+            Ok(r) => {
+                if r.status().is_success() {
+                    let json_resp: ShortenLinkResponse = r.json().await.unwrap();
+                    Ok(json_resp)
+                } else {
+                    Err(r.text().await.unwrap())
+                }
+            }
+
+            Err(r) => Err(r.to_string()),
+        }
+    }
 }
