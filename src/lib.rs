@@ -1,37 +1,49 @@
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::{
+    Client,
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-#[allow(unused)]
-#[derive(Deserialize, Debug)]
-pub struct ShortenLinkResponse {
-    data: LinkData,
-    success: bool,
-    status: u16,
+#[derive(Debug, Error)]
+pub enum WaaAiError {
+    #[error("Request failed: {0}")]
+    RequestError(String),
+    #[error("Response parsing failed: {0}")]
+    ParseError(String),
+    #[error("API responded with error: {0}")]
+    ApiError(String),
 }
 
-#[allow(unused)]
+#[derive(Deserialize, Debug)]
+pub struct ShortenResponse {
+    pub data: LinkData,
+    pub success: bool,
+    pub status: u16,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 pub struct LinkData {
-    link: String,
-    short_code: String,
-    long_url: String,
-    delete_hash: String,
-    created_at: String,
-    last_visited: Option<String>,
-    clicks: u32,
-    extension: Option<String>,
-    private_hash: Option<String>,
+    pub link: String,
+    pub short_code: String,
+    pub long_url: String,
+    pub delete_hash: String,
+    pub created_at: String,
+    pub last_visited: Option<String>,
+    pub clicks: u32,
+    pub extension: Option<String>,
+    pub private_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct LinkInfoResponse {
-    data: LinkData,
-    success: bool,
-    status: u16,
+    pub data: LinkData,
+    pub success: bool,
+    pub status: u16,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-struct ShortenLinkRequest<'a> {
+struct ShortenRequest<'a> {
     url: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     custom_code: Option<&'a str>,
@@ -39,122 +51,192 @@ struct ShortenLinkRequest<'a> {
     private: Option<bool>,
 }
 
-#[allow(dead_code)]
-struct Client<'a> {
-    api_key: &'a str,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteData {
+    pub message: String,
 }
 
-#[allow(unused)]
-impl Client<'_> {
-    pub async fn new(api_key: &str) -> Client {
-        Client { api_key }
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DeleteResponse {
+    pub data: DeleteData,
+    pub success: bool,
+    pub status: u16,
+}
+
+pub struct WaaAiClient<'a> {
+    api_key: &'a str,
+    http_client: reqwest::Client,
+}
+
+impl<'a> WaaAiClient<'a> {
+    pub fn new(api_key: &'a str) -> Self {
+        Self {
+            api_key,
+            http_client: reqwest::Client::new(),
+        }
     }
-    pub async fn shorten_a_link(
+
+    pub async fn shorten_link(
         &self,
         url: &str,
         custom_code: Option<&str>,
         private: Option<bool>,
-    ) -> Result<String, String> {
-        let client = reqwest::Client::new();
-        let mut request_body = ShortenLinkRequest {
-            url,
-            custom_code: None,
-            private: None,
-        };
-
-        if let Some(val) = custom_code {
-            request_body.custom_code = custom_code;
-        };
-
-        if let Some(val) = private {
-            request_body.private = private;
-        };
-
-        let mut headers = HeaderMap::new();
-
-        let api_key = format!("API-key {}", self.api_key);
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&api_key).unwrap());
-
-        let r = client
-            .post("https://api.waa.ai/v2/links")
-            .headers(headers)
-            .json(&request_body)
-            .send()
-            .await;
-
-        match r {
-            Ok(r) => {
-                if r.status().is_success() {
-                    let json_resp: ShortenLinkResponse = r.json().await.unwrap();
-                    Ok(json_resp.data.link)
-                } else {
-                    Err(r.text().await.unwrap())
-                }
-            }
-
-            Err(r) => Err(r.to_string()),
-        }
+    ) -> Result<String, WaaAiError> {
+        let full_response = self.shorten_link_full(url, custom_code, private).await?;
+        Ok(full_response.data.link)
     }
 
-    pub async fn get_link_info(&self, short_code: &str) -> Result<LinkInfoResponse, String> {
-        let response = reqwest::get(format!("https://api.waa.ai/v2/links/{}", short_code)).await;
-        match response {
-            Ok(val) => {
-                if val.status().is_success() {
-                    let re: LinkInfoResponse = val.json().await.unwrap();
-                    Ok(re)
-                } else {
-                    Err(val.text().await.unwrap())
-                }
-            }
-            Err(val) => Err(val.to_string()),
-        }
-    }
-
-    pub async fn shorten_a_link_all(
+    pub async fn shorten_link_full(
         &self,
         url: &str,
         custom_code: Option<&str>,
         private: Option<bool>,
-    ) -> Result<ShortenLinkResponse, String> {
-        let client = reqwest::Client::new();
-        let mut request_body = ShortenLinkRequest {
+    ) -> Result<ShortenResponse, WaaAiError> {
+        let body = ShortenRequest {
             url,
-            custom_code: None,
-            private: None,
-        };
-
-        if let Some(val) = custom_code {
-            request_body.custom_code = custom_code;
-        };
-
-        if let Some(val) = private {
-            request_body.private = private;
+            custom_code,
+            private,
         };
 
         let mut headers = HeaderMap::new();
+        let auth = format!("API-key {}", self.api_key);
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&auth).map_err(|e| WaaAiError::RequestError(e.to_string()))?,
+        );
 
-        let api_key = format!("API-key {}", self.api_key);
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&api_key).unwrap());
-
-        let r = client
+        let res = self
+            .http_client
             .post("https://api.waa.ai/v2/links")
             .headers(headers)
-            .json(&request_body)
+            .json(&body)
             .send()
-            .await;
+            .await
+            .map_err(|e| WaaAiError::RequestError(e.to_string()))?;
 
-        match r {
-            Ok(r) => {
-                if r.status().is_success() {
-                    let json_resp: ShortenLinkResponse = r.json().await.unwrap();
-                    Ok(json_resp)
-                } else {
-                    Err(r.text().await.unwrap())
-                }
-            }
+        let status = res.status();
 
-            Err(r) => Err(r.to_string()),
+        if status.is_success() {
+            res.json::<ShortenResponse>()
+                .await
+                .map_err(|e| WaaAiError::ParseError(e.to_string()))
+        } else {
+            let msg = res
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".into());
+            Err(WaaAiError::ApiError(msg))
+        }
+    }
+
+    pub async fn get_link_info(&self, short_code: &str) -> Result<LinkInfoResponse, WaaAiError> {
+        let res = self
+            .http_client
+            .get(format!("https://api.waa.ai/v2/links/{}", short_code))
+            .send()
+            .await
+            .map_err(|e| WaaAiError::RequestError(e.to_string()))?;
+
+        let status = res.status();
+
+        if status.is_success() {
+            res.json::<LinkInfoResponse>()
+                .await
+                .map_err(|e| WaaAiError::ParseError(e.to_string()))
+        } else {
+            let msg = res
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".into());
+            Err(WaaAiError::ApiError(msg))
+        }
+    }
+    pub async fn get_links(&self) -> Result<ShortenResponse, WaaAiError> {
+        let auth = format!("API-key {}", self.api_key);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&auth).map_err(|e| WaaAiError::RequestError(e.to_string()))?,
+        );
+        let c = Client::new();
+
+        let res = c
+            .get("https://api.waa.ai/v2/links")
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| WaaAiError::RequestError(e.to_string()))?;
+
+        let status = res.status();
+
+        if status.is_success() {
+            res.json::<ShortenResponse>()
+                .await
+                .map_err(|e| WaaAiError::ParseError(e.to_string()))
+        } else {
+            let msg = res
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".into());
+            Err(WaaAiError::ApiError(msg))
+        }
+    }
+
+    pub async fn delete_link(&self, short_code: &str) -> Result<DeleteResponse, WaaAiError> {
+        let auth = format!("API-key {}", self.api_key);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&auth).map_err(|e| WaaAiError::RequestError(e.to_string()))?,
+        );
+        let c = Client::new();
+        let res = c
+            .delete(format!("https://api.waa.ai/v2/links/{}", short_code))
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| WaaAiError::RequestError(e.to_string()))?;
+
+        let status = res.status();
+        if status.is_success() {
+            res.json::<DeleteResponse>()
+                .await
+                .map_err(|e| WaaAiError::ParseError(e.to_string()))
+        } else {
+            let msg = res
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".into());
+            Err(WaaAiError::ApiError(msg))
+        }
+    }
+
+    pub async fn delete_link_unauthed(
+        &self,
+        short_code: &str,
+        delete_hash: &str,
+    ) -> Result<DeleteResponse, WaaAiError> {
+        let c = Client::new();
+        let res = c
+            .delete(format!(
+                "https://api.waa.ai/v2/links/{}/{}",
+                short_code, delete_hash
+            ))
+            .send()
+            .await
+            .map_err(|e| WaaAiError::RequestError(e.to_string()))?;
+
+        let status = res.status();
+        if status.is_success() {
+            res.json::<DeleteResponse>()
+                .await
+                .map_err(|e| WaaAiError::ParseError(e.to_string()))
+        } else {
+            let msg = res
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".into());
+            Err(WaaAiError::ApiError(msg))
         }
     }
 }
